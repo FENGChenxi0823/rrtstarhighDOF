@@ -35,12 +35,71 @@ class RRTStar():
         self.steersize=steersize
         self.checksize=0.28
 
-        self.failSparsity=0.3
+        self.failSparsity=0.54
+        self.squaredFailSparsity=self.failSparsity**2
 
-        self.samplingStrategyBias=90 #30,50,70,90
+        self.samplingStrategyBias=70 #30,50,70,90
         self.impBias=50 # no imp #30,50
         self.maxIter=10000
         self.r=self.steersize
+        self.ballRadius = self.steersize**2
+
+    def RRTSearchMaxTime(self, animation=0):
+        allcosts=[]
+        alltimes=[]
+        timestart = time.time()
+        timenow = timestart
+        maxtime=timestart+60.0*15
+        #random.seed(0)
+        firstFound = False
+        self.nodeTree=[]
+        self.nodeTree.append(self.start)
+        self.failNodes=[]
+        iteration=0
+        while timenow < maxtime: # 15 mins
+            iteration +=1
+            if firstFound:
+                self.goalBias = -1
+                if self.failNodes and random.randint(0, 100) > self.samplingStrategyBias: # rnegular sampling strategy
+                    rndQ = self.get_random_point()
+                else:  
+                    #rndQ = self.get_random_point()
+                    rndQ = self.get_point_around_failnodes() #LDV
+            else:
+                rndQ = self.get_random_point()         
+            minidx = self.GetNearestListIndex(rndQ)
+            newNode = self.steer(rndQ, minidx)
+
+            self.addFailNode(newNode) #LDV
+            if self.__CollisionCheck(newNode):
+                nearinds = self.find_near_nodes(newNode)
+                newNode = self.choose_parent(newNode, nearinds)
+                self.nodeTree.append(newNode)
+                self.updateVisibility(newNode) # LDV
+                self.rewire(newNode, nearinds, minidx)
+                self.updateFailNodesImportance() # LDV
+
+            if not firstFound:
+                bestpath, minpathcost = self.get_best_solution()
+                if bestpath is None:
+                    firstFound = False
+                else:
+                    firstFound = True
+                    allcosts.append(minpathcost)
+                    print "First Found! Cost: "+ str(minpathcost) + ". Time: " + str(timenow-timestart)
+            #else:
+            if iteration % 500 == 0:
+                print "Time passed: "+str(timenow-timestart)
+
+
+            timenow=time.time()
+            
+        if not firstFound:
+            return None, minpathcost,timenow-timestart, len(self.nodeTree)
+        else:
+            bestpath, minpathcost = self.get_best_solution()
+            allcosts.append(minpathcost)
+            return bestpath, allcosts,timenow, len(self.nodeTree)
 
     def RRTSearch(self, animation=1):
         timestart = time.time()
@@ -137,15 +196,14 @@ class RRTStar():
             self.failNodes.append(failNode)
         else:
             mindist = self.GetNearestNeighborDist(failNodeQ)
-            if  mindist>self.failSparsity:
+            if  mindist>self.squaredFailSparsity:
                 failNode = FailNode(failNodeQ)
                 self.failNodes.append(failNode)
 
     def updateFailNodesImportance(self):
-        ballRadius = self.steersize
         for failNode in self.failNodes:
-            distlist = [self.computeDistance(failNode.q, node.q) for node in self.nodeTree]
-            inds = [distlist.index(i) for i in distlist if i <= ballRadius]
+            distlist = [self.computeSqauredDistance(failNode.q, node.q) for node in self.nodeTree]
+            inds = [distlist.index(i) for i in distlist if i <= self.ballRadius]
             if len(inds)<=0:
                 failNode.imp = float("inf")
             else:
@@ -158,6 +216,11 @@ class RRTStar():
                 avgVis = vis/vol
                 failNode.imp = avgVis/vol/vol
   
+    def computeSqauredDistance(self, qFrom, qTo):
+        dist = 0
+        for i in range(self.DOF):
+            dist += (qTo[i]-qFrom[i])**2
+        return dist
 
     def computeDistance(self, qFrom, qTo): # get distance between two configs
         dist = 0
@@ -269,7 +332,7 @@ class RRTStar():
 
     def get_best_solution(self):
 
-        disglist = [self.computeDistance(node.q, self.goal.q) for node in self.nodeTree]
+        disglist = [self.computeSqauredDistance(node.q, self.goal.q) for node in self.nodeTree]
         goalinds = [disglist.index(i) for i in disglist if i <= 0]
         
         if not goalinds:
@@ -331,13 +394,11 @@ class RRTStar():
 
     def find_near_nodes(self, newNode):
         nnode = len(self.nodeTree)
-        self.r = min(50.0 * (math.log(nnode) / nnode)**(1.0/2), self.steersize)
+        self.r = min(50.0 * (math.log(nnode) / nnode)**(1.0/self.DOF), self.steersize)
         #  r = self.expandDis * 5.0
         dlist = []
         for node in self.nodeTree:
-            dist = 0.0
-            for i in range(self.DOF):
-                dist += (node.q[i] - newNode.q[i])**2
+            dist=self.computeSqauredDistance(node.q,newNode.q)
             dlist.append(dist)
         nearinds = [dlist.index(i) for i in dlist if i <= self.r ]
         return nearinds
@@ -390,20 +451,16 @@ class RRTStar():
         '''
         dlist = []
         for node in self.nodeTree:
-            dist = 0.0
-            for i in range(self.DOF):
-                dist += (node.q[i] - rndQ[i])**2
+            dist=self.computeSqauredDistance(rndQ,node.q)
             dlist.append(dist)       
         minidx = dlist.index(min(dlist))
         return minidx
         
     
-    def GetNearestNeighborDist(self, rndQ):
+    def GetNearestNeighborDist(self, nodeQ):
         dlist = []
         for node in self.failNodes:
-            dist = 0.0
-            for i in range(self.DOF):
-                dist += (node.q[i] - rndQ[i])**2
+            dist=self.computeSqauredDistance(nodeQ,node.q)
             dlist.append(dist)
         mindist = min(dlist)
         return mindist
